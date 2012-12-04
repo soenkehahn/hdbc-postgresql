@@ -1,7 +1,9 @@
 module TestSbasics(tests) where
 import Test.HUnit
 import Data.List
+import Data.Set (Set, fromList)
 import Database.HDBC
+import Control.Applicative ((<$>))
 import TestUtils
 import System.IO
 import Control.Exception hiding (catch)
@@ -113,6 +115,23 @@ testsFetchAllRows = dbTestCase (\dbh ->
                                )
     where rows = map (\x -> [Just . show $ x]) [1..9]
 
+testStatementDeallocation = dbTestCase $ \dbh ->
+     do before <- getPreparedStatements dbh
+        sth <- prepare dbh "SELECT 1 + 1"
+        executeRaw sth
+        finish sth
+        after <- getPreparedStatements dbh
+        assertEqual "" before after
+  where
+    -- Returns all prepared statements. This uses prepared statements
+    -- internally, but they should have the same name.
+    getPreparedStatements :: IConnection c => c -> IO (Set String)
+    getPreparedStatements dbh =
+        fromList <$> map convert <$>
+        quickQuery' dbh "SELECT name FROM pg_prepared_statements;" []
+    convert :: [SqlValue] -> String
+    convert [x] = fromSql x
+
 basicTransactions = dbTestCase (\dbh ->
     do assertBool "Connected database does not support transactions; skipping transaction test" (dbTransactionSupport dbh)
        sth <- prepare dbh "INSERT INTO hdbctest1 VALUES ('basicTransactions', ?, NULL, NULL)"
@@ -172,6 +191,7 @@ tests = TestList
          TestLabel "executeMany" testExecuteMany,
          TestLabel "executeRaw" testExecuteRaw,
          TestLabel "sFetchAllRows" testsFetchAllRows,
+         TestLabel "statementDeallocation" testStatementDeallocation,
          TestLabel "basicTransactions" basicTransactions,
          TestLabel "withTransaction" testWithTransaction,
          TestLabel "dropTable" dropTable
