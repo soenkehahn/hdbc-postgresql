@@ -96,6 +96,12 @@ testExecuteMany = dbTestCase (\dbh ->
                   map Just ["2", "1341", "bar"],
                   [Just "3", Nothing, Nothing]]
 
+testExecuteRaw = dbTestCase $ \dbh ->
+    do sth <- prepare dbh "SELECT 1 + 1"
+       executeRaw sth
+       sFetchRow sth >>= assertEqual "" (Just [Just "2"])
+       sFetchRow sth >>= (assertEqual "lastrow" Nothing)
+
 testsFetchAllRows = dbTestCase (\dbh ->
     do sth <- prepare dbh "INSERT INTO hdbctest1 VALUES ('sFetchAllRows', ?, NULL, NULL)"
        sExecuteMany sth rows
@@ -164,6 +170,7 @@ tests = TestList
          TestLabel "runReplace" runReplace,
          TestLabel "executeReplace" executeReplace,
          TestLabel "executeMany" testExecuteMany,
+         TestLabel "executeRaw" testExecuteRaw,
          TestLabel "sFetchAllRows" testsFetchAllRows,
          TestLabel "basicTransactions" basicTransactions,
          TestLabel "withTransaction" testWithTransaction,
