@@ -4,10 +4,9 @@ import Database.HDBC.PostgreSQL
 import Database.HDBC.PostgreSQL.Parser(convertSQL)
 import Test.HUnit
 
-testp :: String -> String -> Test
 testp inp exp = TestCase $
     case convertSQL inp of
-      Right (x, _) -> assertEqual "" exp x
+      Right x -> assertEqual "" exp x
       Left y -> assertFailure $ show y
 
 tests = TestList 

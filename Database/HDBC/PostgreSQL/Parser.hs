@@ -62,18 +62,5 @@ statement =
                   (anyChar >>= (\x -> return [x])))
        return $ concat s
 
--- | replaces (unescaped) question marks with postgres-style
--- numbered parameters ("$1", "$2", ...).
--- Also, returns the number of replaced parameters.
-convertSQL :: String -> Either ParseError (String, Int)
-convertSQL input =
-    fmap (\ (state, result) -> (result, fromIntegral $ pred state)) $
-    runStateParser statement (1::Integer) "" input
-
-runStateParser :: GenParser Char st String -> st -> String -> String -> Either ParseError (st, String)
-runStateParser p initial source input = runParser wrapped initial source input
-  where
-    wrapped = do
-        r <- p
-        n <- getState
-        return (n, r)
+convertSQL :: String -> Either ParseError String
+convertSQL input = runParser statement (1::Integer) "" input

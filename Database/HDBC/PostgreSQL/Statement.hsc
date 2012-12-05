@@ -60,7 +60,7 @@ newSth indbo mchildren query =
                                        seNativeError = (-1),
                                        seErrorMsg = "hdbc prepare: " ++
                                                     show errstr}
-                      Right (converted, _) -> return converted
+                      Right converted -> return converted
        let sstate = SState {stomv = newstomv, nextrowmv = newnextrowmv,
                             dbo = indbo, squery = usequery,
                             preparedStatement = Nothing,
@@ -95,7 +95,7 @@ newPreparedSth indbo mchildren query =
        newstomv <- newMVar Nothing
        newnextrowmv <- newMVar (-1)
        newcoldefmv <- newMVar []
-       (usequery, _) <- case convertSQL query of
+       usequery <- case convertSQL query of
                       Left errstr -> throwSqlError $ SqlError
                                       {seState = "",
                                        seNativeError = (-1),
