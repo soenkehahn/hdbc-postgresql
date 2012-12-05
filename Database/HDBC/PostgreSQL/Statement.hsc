@@ -12,7 +12,8 @@ import Foreign.ForeignPtr
 import Foreign.Ptr
 import Control.Concurrent.MVar
 import Foreign.C.String
-import Control.Monad
+import Control.Applicative ((<$>))
+import Control.Monad (liftM)
 import Data.List
 import Data.Word
 import Data.Ratio
@@ -35,10 +36,18 @@ data SState =
              nextrowmv :: MVar (CInt), -- -1 for no next row (empty); otherwise, next row to read.
              dbo :: Conn,
              squery :: String,
+             -- Contains the query for the db, possibly with missing arguments.
+             -- These parameters are postgres-style, i.e. $1, $2, ...
+             -- (This is used when executing unprepared queries.)
+             preparedStatement :: Maybe StmtName,
+             -- Contains Nothing in case of unprepared queries.
+             -- Contains the name of the prepared statement, if that exists.
              coldefmv :: MVar [(String, SqlColDesc)]}
 
--- FIXME: we currently do no prepare optimization whatsoever.
+newtype StmtName = StmtName String
 
+
+-- | Initializes and returns an unprepared 'Statement'.
 newSth :: Conn -> ChildList -> String -> IO Statement
 newSth indbo mchildren query =
     do l "in newSth"
@@ -54,6 +63,7 @@ newSth indbo mchildren query =
                       Right (converted, _) -> return converted
        let sstate = SState {stomv = newstomv, nextrowmv = newnextrowmv,
                             dbo = indbo, squery = usequery,
+                            preparedStatement = Nothing,
                             coldefmv = newcoldefmv}
        let retval =
                 Statement {execute = fexecute sstate,
@@ -66,6 +76,92 @@ newSth indbo mchildren query =
                            describeResult = fdescribeResult sstate}
        addChild mchildren retval
        return retval
+
+
+-- * prepared queries
+
+-- | Initializes and returns a prepared 'Statement'.
+-- Duplicates most of the code from newSth, except for the call to
+-- 'prepareQuery'.
+--
+-- prepared statements in postgresql can only be
+-- SELECT, INSERT, UPDATE, DELETE, or VALUES.
+-- As 'quickQuery' is implemented internally using prepared
+-- statements (in the HDBC package), this constraint applies also for
+-- 'quickQuery'. Use 'run' for other statements.
+newPreparedSth :: Conn -> ChildList -> String -> IO Statement
+newPreparedSth indbo mchildren query =
+    do l "in newPreparedSth"
+       newstomv <- newMVar Nothing
+       newnextrowmv <- newMVar (-1)
+       newcoldefmv <- newMVar []
+       (usequery, _) <- case convertSQL query of
+                      Left errstr -> throwSqlError $ SqlError
+                                      {seState = "",
+                                       seNativeError = (-1),
+                                       seErrorMsg = "hdbc prepare: " ++
+                                                    show errstr}
+                      Right x -> return x
+       preparedStmt <- prepareStatement indbo mchildren usequery
+       let sstate = SState {stomv = newstomv, nextrowmv = newnextrowmv,
+                            dbo = indbo, squery = usequery,
+                            preparedStatement = Just preparedStmt,
+                            coldefmv = newcoldefmv}
+       let retval =
+                Statement {execute = fexecute sstate,
+                           executeMany = fexecutemany sstate,
+                           executeRaw = fexecuteRaw sstate,
+                           finish = public_ffinish sstate,
+                           fetchRow = ffetchrow sstate,
+                           originalQuery = query,
+                           getColumnNames = fgetColumnNames sstate,
+                           describeResult = fdescribeResult sstate}
+       addChild mchildren retval
+       return retval
+
+prepareStatement :: Conn -> ChildList -> String -> IO StmtName
+prepareStatement conn mchildren query = do
+    allPreparedStatements <- getAllPreparedStatements
+    let stmtName = head $ filter (\ n -> not (n `elem` allPreparedStatements))
+            (map (\ i -> "hdbcpreparedstatement" ++ show i) [0 :: Integer ..])
+    let prepareQuery = "PREPARE " ++ stmtName ++ " AS " ++ query ++ ";"
+    withConnLocked conn $ \cconn ->
+        B.useAsCString (BUTF8.fromString prepareQuery) $ \ cquery ->
+            do l "in prepareQuery"
+               resptr <- pqexec cconn cquery
+               throwSqlErrorOnError cconn =<< (pqresultStatus resptr :: IO Word32)
+               return ()
+    return $ StmtName stmtName
+  where
+    -- Returns the names of all registered prepared queries.
+    getAllPreparedStatements :: IO [String]
+    getAllPreparedStatements =
+        map convert <$> quickQueryUnprepared
+            "SELECT name FROM pg_prepared_statements;" []
+      where
+        convert :: [SqlValue] -> String
+        convert [name] = fromSql name
+        convert _ = error "hdbc: prepareStatement: sql error"
+
+    -- Internal strict version of quickQuery using unprepared statements.
+    quickQueryUnprepared :: String -> [SqlValue] -> IO [[SqlValue]]
+    quickQueryUnprepared q arguments = do
+        sstate <- newSth conn mchildren q
+        -- FIXME: error handling
+        _ <- execute sstate arguments
+        fetchAllRows sstate
+    
+    throwSqlErrorOnError :: Ptr CConn -> Word32 -> IO ()
+    throwSqlErrorOnError cconn status = case status of
+        #{const PGRES_COMMAND_OK} -> return ()
+        _ -> do
+            errormsg  <- peekCStringUTF8 =<< pqerrorMessage cconn
+            statusmsg <- peekCStringUTF8 =<< pqresStatus status
+            throwSqlError $ SqlError { seState = "E"
+                                     , seNativeError = fromIntegral status
+                                     , seErrorMsg = "execute: " ++ statusmsg ++
+                                                    ": " ++ errormsg}
+
 
 fgetColumnNames :: SState -> IO [(String)]
 fgetColumnNames sstate =
@@ -80,12 +176,18 @@ fdescribeResult sstate =
 FIXME lots of room for improvement here (types, etc). -}
 fexecute :: (Num a, Read a) => SState -> [SqlValue] -> IO a
 fexecute sstate args = withConnLocked (dbo sstate) $ \cconn ->
-                       B.useAsCString (BUTF8.fromString (squery sstate)) $ \cquery ->
                        withCStringArr0 args $ \cargs -> -- wichSTringArr0 uses UTF-8
     do l "in fexecute"
        public_ffinish sstate    -- Sets nextrowmv to -1
-       resptr <- pqexecParams cconn cquery
-                 (genericLength args) nullPtr cargs nullPtr nullPtr 0
+       resptr <- case preparedStatement sstate of
+                    Nothing ->
+                        B.useAsCString (BUTF8.fromString (squery sstate)) $ \cquery ->
+                        pqexecParams cconn cquery
+                            (genericLength args) nullPtr cargs nullPtr nullPtr 0
+                    Just (StmtName stmtName) ->
+                        B.useAsCString (BUTF8.fromString stmtName) $ \cStmtName ->
+                        pqexecPrepared cconn cStmtName
+                            (genericLength args) cargs nullPtr nullPtr 0
        handleResultStatus cconn resptr sstate =<< pqresultStatus resptr
 
 {- | Differs from fexecute in that it does not prepare its input
@@ -94,12 +196,19 @@ fexecute sstate args = withConnLocked (dbo sstate) $ \cconn ->
 fexecuteRaw :: SState -> IO ()
 fexecuteRaw sstate =
     withConnLocked (dbo sstate) $ \cconn ->
-        B.useAsCString (BUTF8.fromString (squery sstate)) $ \cquery ->
-            do l "in fexecute"
-               public_ffinish sstate    -- Sets nextrowmv to -1
-               resptr <- pqexec cconn cquery
-               _ <- handleResultStatus cconn resptr sstate =<< pqresultStatus resptr :: IO Int
-               return ()
+        do l "in fexecute"
+           public_ffinish sstate    -- Sets nextrowmv to -1
+           resptr <- case preparedStatement sstate of
+                Nothing ->
+                    B.useAsCString (BUTF8.fromString (squery sstate)) $ \cquery ->
+                    pqexec cconn cquery
+                Just (StmtName stmtName) ->
+                    withCStringArr0 [] $ \cEmptyArgs ->
+                    B.useAsCString (BUTF8.fromString stmtName) $ \cStmtName ->
+                    pqexecPrepared cconn cStmtName
+                        0 cEmptyArgs nullPtr nullPtr 0
+           _ <- handleResultStatus cconn resptr sstate =<< pqresultStatus resptr :: IO Int
+           return ()
 
 handleResultStatus :: (Num a, Read a) => Ptr CConn -> WrappedCStmt -> SState -> ResultStatus -> IO a
 handleResultStatus cconn resptr sstate status =
@@ -235,6 +344,18 @@ foreign import ccall safe "libpq-fe.h PQexecParams"
                   (Ptr CInt) ->
                   CInt ->
                   IO (Ptr CStmt)
+
+-- We cannot just use pqexecParams to execute "EXECUTE"-statements for
+-- prepared statements since that does not support parameters
+-- ($1, $2, ...). See here:
+-- http://postgresql.1045698.n5.nabble.com/Executing-prepared-statements-via-bind-params-td4496507.html
+foreign import ccall safe "libpq-fe.h PQexecPrepared"
+  pqexecPrepared :: (Ptr CConn) -> CString -> CInt ->
+                    (Ptr CString) ->
+                    (Ptr CInt) ->
+                    (Ptr CInt) ->
+                    CInt ->
+                    IO (Ptr CStmt)
 
 foreign import ccall safe "libpq-fe.h PQexec"
   pqexec :: (Ptr CConn) -> CString -> IO (Ptr CStmt)
