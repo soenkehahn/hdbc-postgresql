@@ -51,7 +51,7 @@ newSth indbo mchildren query =
                                        seNativeError = (-1),
                                        seErrorMsg = "hdbc prepare: " ++
                                                     show errstr}
-                      Right converted -> return converted
+                      Right (converted, _) -> return converted
        let sstate = SState {stomv = newstomv, nextrowmv = newnextrowmv,
                             dbo = indbo, squery = usequery,
                             coldefmv = newcoldefmv}
