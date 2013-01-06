@@ -6,7 +6,7 @@ import Database.HDBC
 import Control.Applicative ((<$>))
 import TestUtils
 import System.IO
-import Control.Exception hiding (catch)
+import Control.Exception
 
 openClosedb = sqlTestCase $ 
     do dbh <- connectDB
@@ -167,7 +167,7 @@ testWithTransaction = dbTestCase (\dbh ->
        -- Let's try a rollback.
        catch (withTransaction dbh (\_ -> do sExecuteMany sth rows
                                             fail "Foo"))
-             (\_ -> return ())
+             ((\_ -> return ()) :: SomeException -> IO ())
        sExecute qrysth []
        sFetchAllRows qrysth >>= (assertEqual "rollback" [[Just "0"]])
 
