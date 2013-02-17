@@ -80,12 +80,14 @@ fdescribeResult sstate =
 FIXME lots of room for improvement here (types, etc). -}
 fexecute :: (Num a, Read a) => SState -> [SqlValue] -> IO a
 fexecute sstate args = withConnLocked (dbo sstate) $ \cconn ->
-                       B.useAsCString (BUTF8.fromString (squery sstate)) $ \cquery ->
-                       withCStringArr0 args $ \cargs -> -- wichSTringArr0 uses UTF-8
+                       B.useAsCString (BUTF8.fromString (squery sstate)) $ \ cquery ->
+                       withCArraysMixedFormats args $ \ ctypes clengths cformats ->
+                       withCArrayValuesMixedFormats args $ \ cargs ->
+                       -- wichSTringArr0 uses UTF-8
     do l "in fexecute"
        public_ffinish sstate    -- Sets nextrowmv to -1
        resptr <- pqexecParams cconn cquery
-                 (genericLength args) nullPtr cargs nullPtr nullPtr 0
+                 (genericLength args) ctypes cargs clengths cformats 0
        handleResultStatus cconn resptr sstate =<< pqresultStatus resptr
 
 {- | Differs from fexecute in that it does not prepare its input
@@ -209,8 +211,19 @@ fgetcoldef cstmt =
 
 -- FIXME: needs a faster algorithm.
 fexecutemany :: SState -> [[SqlValue]] -> IO ()
-fexecutemany sstate arglist =
-    mapM_ (fexecute sstate :: [SqlValue] -> IO Int) arglist >> return ()
+fexecutemany sstate rows@(firstRow : _) =
+    withConnLocked (dbo sstate) $ \cconn ->
+    B.useAsCString (BUTF8.fromString (squery sstate)) $ \ cquery ->
+    withCArraysMixedFormats firstRow $
+    \ ctypes clengths cformats ->
+    forM_ rows $ \ row ->
+        withCArrayValuesMixedFormats row $ \ cargs -> do
+            public_ffinish sstate    -- Sets nextrowmv to -1
+            resptr <- pqexecParams cconn cquery
+                        (genericLength row) ctypes cargs clengths cformats 0
+            _ <- handleResultStatus cconn resptr sstate =<< pqresultStatus resptr :: IO Int
+            return ()
+fexecutemany _ [] = return ()
 
 -- Finish and change state
 public_ffinish :: SState -> IO ()
