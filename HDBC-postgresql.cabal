@@ -23,6 +23,9 @@ Flag splitBase
 Flag buildtests
   description: Build the executable to run unit tests
   default: False
+Flag buildbenchmarks
+  description: Build the executable to run benchmarks
+  default: False
 
 Library
   Exposed-Modules: Database.HDBC.PostgreSQL
@@ -76,6 +79,35 @@ Executable runtests
    GHC-Options: -O2
    Extensions: ExistentialQuantification,
                ForeignFunctionInterface
+
+Executable runbenchmarks
+   if flag(buildbenchmarks)
+      Buildable: True
+      Build-Depends:
+            HDBC>=2.2.6,
+            base,
+            HUnit,
+            parsec,
+            convertible,
+            utf8-string,
+            bytestring,
+            old-locale,
+            time,
+            criterion
+   else
+      Buildable: False
+   Main-Is: runbenchmarks.hs
+   Other-Modules:
+      Database.HDBC.PostgreSQL.Connection,
+      Database.HDBC.PostgreSQL.Statement,
+      Database.HDBC.PostgreSQL.Utils,
+      Database.HDBC.PostgreSQL.PTypeConv
+   C-Sources: hdbc-postgresql-helper.c
+   include-dirs: .
+   Extra-Libraries: pq
+   Hs-Source-Dirs: ., testsrc
+   Extensions:
+      ForeignFunctionInterface
 
 source-repository head
   type:     git
