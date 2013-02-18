@@ -22,6 +22,7 @@ tests = TestList $
     qctest "identityBytestring" identityBytestring :
     qctest "identityDouble" identityDouble :
     qctest "identityInt64" identityInt64 :
+    qctest "identityInt32" identityInt32 :
     []
 
 
@@ -57,6 +58,9 @@ identityDouble = identity (P :: Phantom Double) "double precision" (const True) 
 
 identityInt64 :: Property
 identityInt64 = identity (P :: Phantom Int64) "bigint" (const True) (==)
+
+identityInt32 :: Property
+identityInt32 = identity (P :: Phantom Int32) "integer" (const True) (==)
 
 -- | Tests if a value (that fulfills a given precondition) can be put in
 --   the database and read back and if that output is equal to the input
