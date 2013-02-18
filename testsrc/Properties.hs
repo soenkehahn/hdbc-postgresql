@@ -8,6 +8,7 @@ import Control.Exception
 import Database.HDBC
 import Data.ByteString (ByteString, pack, unpack)
 import Data.Convertible
+import Data.Int
 import Test.HUnit
 import Test.HUnit.Tools
 import Test.QuickCheck
@@ -20,7 +21,7 @@ tests = TestList $
     qctest "identityString" identityString :
     qctest "identityBytestring" identityBytestring :
     qctest "identityDouble" identityDouble :
-    qctest "identityInt" identityInt :
+    qctest "identityInt64" identityInt64 :
     []
 
 
@@ -54,8 +55,8 @@ identityBytestring = identity (P :: Phantom ByteString) "bytea" (const True) (==
 identityDouble :: Property
 identityDouble = identity (P :: Phantom Double) "double precision" (const True) (epsilonEquals 0.00000001)
 
-identityInt :: Property
-identityInt = identity (P :: Phantom Int) "bigint" (const True) (==)
+identityInt64 :: Property
+identityInt64 = identity (P :: Phantom Int64) "bigint" (const True) (==)
 
 -- | Tests if a value (that fulfills a given precondition) can be put in
 --   the database and read back and if that output is equal to the input
