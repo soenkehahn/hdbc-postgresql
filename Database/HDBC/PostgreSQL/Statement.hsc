@@ -10,8 +10,11 @@ import Database.HDBC.PostgreSQL.Utils
 import Foreign.C.Types
 import Foreign.ForeignPtr
 import Foreign.Ptr
+import Foreign.Storable
 import Control.Concurrent.MVar
 import Foreign.C.String
+import Foreign.Marshal.Alloc
+import Foreign.Marshal.Array
 import Control.Monad
 import Data.List
 import Data.Word
@@ -23,6 +26,9 @@ import Database.HDBC.DriverUtils
 import Database.HDBC.PostgreSQL.PTypeConv
 import Data.Time.Format
 import System.Locale
+
+#include "pgtypes.h"
+
 
 l :: Monad m => t -> m ()
 l _ = return ()
@@ -79,16 +85,16 @@ fdescribeResult sstate =
 {- For now, we try to just  handle things as simply as possible.
 FIXME lots of room for improvement here (types, etc). -}
 fexecute :: (Num a, Read a) => SState -> [SqlValue] -> IO a
-fexecute sstate args = withConnLocked (dbo sstate) $ \cconn ->
-                       B.useAsCString (BUTF8.fromString (squery sstate)) $ \ cquery ->
-                       withCArraysMixedFormats args $ \ ctypes clengths cformats ->
-                       withCArrayValuesMixedFormats args $ \ cargs ->
-                       -- wichSTringArr0 uses UTF-8
-    do l "in fexecute"
-       public_ffinish sstate    -- Sets nextrowmv to -1
-       resptr <- pqexecParams cconn cquery
-                 (genericLength args) ctypes cargs clengths cformats 0
-       handleResultStatus cconn resptr sstate =<< pqresultStatus resptr
+fexecute sstate args =
+    withConnLocked (dbo sstate) $ \ cconn ->
+    B.useAsCString (BUTF8.fromString (squery sstate)) $ \ cquery ->
+    withArray (replicate len 0) $ \ ctypes ->
+    withArray (replicate len nullPtr) $ \ cvalues ->
+    withArray (replicate len 0) $ \ clengths ->
+    withArray (replicate len 0) $ \ cformats ->
+    fexecuteOnArrays sstate cconn cquery ctypes cvalues clengths cformats args
+  where
+    len = length args
 
 {- | Differs from fexecute in that it does not prepare its input
    query, and the input query may contain multiple statements.  This
@@ -211,19 +217,78 @@ fgetcoldef cstmt =
 
 -- FIXME: needs a faster algorithm.
 fexecutemany :: SState -> [[SqlValue]] -> IO ()
-fexecutemany sstate rows@(firstRow : _) =
-    withConnLocked (dbo sstate) $ \cconn ->
-    B.useAsCString (BUTF8.fromString (squery sstate)) $ \ cquery ->
-    withCArraysMixedFormats firstRow $
-    \ ctypes clengths cformats ->
-    forM_ rows $ \ row ->
-        withCArrayValuesMixedFormats row $ \ cargs -> do
-            public_ffinish sstate    -- Sets nextrowmv to -1
-            resptr <- pqexecParams cconn cquery
-                        (genericLength row) ctypes cargs clengths cformats 0
-            _ <- handleResultStatus cconn resptr sstate =<< pqresultStatus resptr :: IO Int
-            return ()
 fexecutemany _ [] = return ()
+fexecutemany sstate rows =
+    withConnLocked (dbo sstate) $ \ cconn ->
+    B.useAsCString (BUTF8.fromString (squery sstate)) $ \ cquery ->
+    withArray (replicate len 0) $ \ ctypes ->
+    withArray (replicate len nullPtr) $ \ cvalues ->
+    withArray (replicate len 0) $ \ clengths ->
+    withArray (replicate len 0) $ \ cformats ->
+    mapM_ (fexecuteOnArrays sstate cconn cquery ctypes cvalues clengths cformats :: [SqlValue] -> IO Int) rows
+  where
+    len = length rows
+
+fexecuteOnArrays :: (Read a, Num a) =>
+       SState -> Ptr CConn -> CString
+    -> Ptr #{type Oid} -> Ptr (Ptr CChar) -> Ptr CInt -> Ptr CInt
+    -> [SqlValue] -> IO a
+fexecuteOnArrays sstate cconn cquery ctypes cvalues clengths cformats row = do
+    forM_ (zip [0 ..] row) $ \ (i, v) ->
+        fillArrayCells
+            (advancePtr ctypes i)
+            (advancePtr cvalues i)
+            (advancePtr clengths i)
+            (advancePtr cformats i)
+            v
+    public_ffinish sstate    -- Sets nextrowmv to -1
+    resptr <- pqexecParams cconn cquery
+                (genericLength row) ctypes cvalues clengths cformats 0
+    freeCValues
+    handleResultStatus cconn resptr sstate =<< pqresultStatus resptr
+  where
+    fillArrayCells :: Ptr #{type Oid} -> Ptr (Ptr CChar) -> Ptr CInt -> Ptr CInt
+        -> SqlValue -> IO ()
+    fillArrayCells _ctype cvalue _clength _cformat SqlNull = poke cvalue nullPtr
+    fillArrayCells ctype cvalue clength cformat sqlValue = do
+        case sqlValue of
+            SqlDouble d -> do
+                poke ctype #{const PG_TYPE_FLOAT8}
+                vPtr <- malloc
+                poke vPtr d
+                networkEndian <- revertBytes 8 (castPtr vPtr)
+                poke cvalue (castPtr networkEndian :: Ptr CChar)
+                poke clength 8
+                poke cformat 1
+            SqlInt64 i -> do
+                poke ctype #{const PG_TYPE_INT8}
+                vPtr <- malloc
+                poke vPtr i
+                networkEndian <- revertBytes 8 (castPtr vPtr)
+                poke cvalue (castPtr networkEndian :: Ptr CChar)
+                poke clength 8
+                poke cformat 1
+            SqlInt32 i -> do
+                poke ctype #{const PG_TYPE_INT4}
+                vPtr <- malloc
+                poke vPtr i
+                networkEndian <- revertBytes 4 (castPtr vPtr)
+                poke cvalue (castPtr networkEndian :: Ptr CChar)
+                poke clength 4
+                poke cformat 1
+            x -> do
+                poke ctype 0
+                vPtr <- cstrUtf8BString (fromSql x)
+                poke cvalue vPtr
+                poke clength 0
+                poke cformat 0
+
+    freeCValues :: IO ()
+    freeCValues = forM_ [0 .. pred (length row)] $ \ i -> do
+        ptr <- peek (advancePtr cvalues i)
+        when (ptr /= nullPtr) $
+            free ptr
+
 
 -- Finish and change state
 public_ffinish :: SState -> IO ()
