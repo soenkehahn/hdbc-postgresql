@@ -8,7 +8,10 @@ import Control.Exception
 import Database.HDBC
 import Data.ByteString (ByteString, pack, unpack)
 import Data.Convertible
+import Data.Foldable (forM_)
 import Data.Int
+import Data.List
+import Data.Set as Set (Set, empty, insert, fromList, toList)
 import Test.HUnit
 import Test.HUnit.Tools
 import Test.QuickCheck
@@ -16,13 +19,37 @@ import Test.QuickCheck.Property
 import SpecificDB
 
 
+containsNull :: Maybe String -> Bool
+containsNull = maybe False (elem '\NUL')
+
+epsilonEquals :: (Ord a, Num a) => a -> Maybe a -> Maybe a -> Bool
+epsilonEquals epsilon (Just a) (Just b) =
+    abs (a - b) <= epsilon
+epsilonEquals _ Nothing Nothing = True
+epsilonEquals _ _ _ = False
+
 tests :: Test
 tests = TestList $
-    qctest "identityString" identityString :
-    qctest "identityBytestring" identityBytestring :
-    qctest "identityDouble" identityDouble :
-    qctest "identityInt64" identityInt64 :
-    qctest "identityInt32" identityInt32 :
+    qctest "identityString"
+        (identity (P :: Phantom (Maybe String)) "text" (not . containsNull) (==)) :
+    qctest "identityManyString"
+        (identityMany (P :: Phantom (Maybe String)) "text" (not . containsNull) (==)) :
+    qctest "identityBytestring"
+        (identity (P :: Phantom (Maybe ByteString)) "bytea" (const True) (==)) :
+    qctest "identityManyBytestring"
+        (identityMany (P :: Phantom (Maybe ByteString)) "bytea" (const True) (==)) :
+    qctest "identityDouble"
+        (identity (P :: Phantom (Maybe Double)) "double precision" (const True) (epsilonEquals 0.00000001)) :
+    qctest "identityManyDouble"
+        (identityMany (P :: Phantom (Maybe Double)) "double precision" (const True) (epsilonEquals 0.00000001)) :
+    qctest "identityInt64"
+        (identity (P :: Phantom (Maybe Int64)) "bigint" (const True) (==)) :
+    qctest "identityManyInt64"
+        (identityMany (P :: Phantom (Maybe Int64)) "bigint" (const True) (==)) :
+    qctest "identityInt32"
+        (identity (P :: Phantom (Maybe Int32)) "integer" (const True) (==)) :
+    qctest "identityManyInt32"
+        (identityMany (P :: Phantom (Maybe Int32)) "integer" (const True) (==)) :
     []
 
 
@@ -30,14 +57,19 @@ tests = TestList $
 
 data Phantom a = P
 
-epsilonEquals :: (Ord a, Num a) => a -> a -> a -> Bool
-epsilonEquals epsilon a b =
-    abs (a - b) <= epsilon
-
 equals :: (Show a) => (a -> a -> Bool) -> a -> a -> Property
 equals (~=) a b =
     printTestCase (show a ++ " /~= " ++ show b)
         (a ~= b)
+
+equalSets :: (Show a, Ord a) => (a -> a -> Bool) -> Set a -> Set a -> Property
+equalSets (~=) a b =
+    printTestCase (show a ++ " /~= " ++ show b) $
+    inner (sort $ Set.toList a) (sort $ Set.toList b)
+  where
+    inner [] [] = True
+    inner (a : ra) (b : rb) = (a ~= b) && inner ra rb
+    inner _ _ = False
 
 instance Arbitrary ByteString where
     arbitrary = pack <$> arbitrary
@@ -45,26 +77,11 @@ instance Arbitrary ByteString where
 
 
 
--- * properties
-
-identityString :: Property
-identityString = identity (P :: Phantom String) "text" (\ text -> not (elem '\NUL' text)) (==)
-
-identityBytestring :: Property
-identityBytestring = identity (P :: Phantom ByteString) "bytea" (const True) (==)
-
-identityDouble :: Property
-identityDouble = identity (P :: Phantom Double) "double precision" (const True) (epsilonEquals 0.00000001)
-
-identityInt64 :: Property
-identityInt64 = identity (P :: Phantom Int64) "bigint" (const True) (==)
-
-identityInt32 :: Property
-identityInt32 = identity (P :: Phantom Int32) "integer" (const True) (==)
+-- * generic properties
 
 -- | Tests if a value (that fulfills a given precondition) can be put in
---   the database and read back and if that output is equal to the input
---   (using a given equality function).
+-- the database and read back and if that output is equal to the input
+-- (using a given equality function).
 identity :: forall a . (Arbitrary a, Show a, Eq a, Convertible a SqlValue, Convertible SqlValue a) =>
     Phantom a -> String -> (a -> Bool) -> (a -> a -> Bool) -> Property
 identity _ sqlTypeName pred (~=) =
@@ -81,3 +98,26 @@ identity _ sqlTypeName pred (~=) =
                 quickQuery' db "INSERT INTO testtable VALUES (?);" [toSql a]
                 [[result]] <- quickQuery' db "SELECT * FROM testtable;" []
                 return $ (equals (~=) a (fromSql result))
+
+-- | Like identity, but with multiple values (in multiple rows).
+identityMany :: forall a . (Arbitrary a, Show a, Ord a, Convertible a SqlValue, Convertible SqlValue a) =>
+    Phantom a -> String -> (a -> Bool) -> (a -> a -> Bool) -> Property
+identityMany _ sqlTypeName pred (~=) =
+    property $ \ (xs :: [a]) ->
+    (all pred xs) ==>
+    morallyDubiousIOProperty $
+        -- connect to the db
+        bracket connectDB disconnect $ \ db ->
+        -- create a temporary test table
+        bracket
+            (quickQuery' db ("CREATE TABLE testtable (testfield " ++ sqlTypeName ++ ");") [])
+            (const $ quickQuery' db "DROP TABLE testtable;" []) $
+            const $ do
+                stmt <- prepare db "INSERT INTO testtable VALUES (?);"
+                executeMany stmt $ map ((: []) . toSql) xs
+                results <- quickQuery' db "SELECT testfield FROM testtable;" []
+                return $ (equalSets (~=) (Set.fromList xs) (convert results))
+  where
+    convert :: [[SqlValue]] -> Set a
+    convert ([a] : r) = Set.insert (fromSql a) (convert r)
+    convert [] = Set.empty
