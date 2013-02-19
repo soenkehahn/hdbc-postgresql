@@ -276,6 +276,18 @@ fexecuteOnArrays sstate cconn cquery ctypes cvalues clengths cformats row = do
                 poke cvalue (castPtr networkEndian :: Ptr CChar)
                 poke clength 4
                 poke cformat 1
+            SqlUTCTime _ ->
+                fillArrayCells ctype cvalue clength cformat
+                    (SqlZonedTime (fromSql sqlValue))
+            SqlEpochTime _ ->
+                fillArrayCells ctype cvalue clength cformat
+                    (SqlZonedTime (fromSql sqlValue))
+            SqlByteString x -> do
+                poke ctype 0
+                vPtr <- cstrUtf8BString (cleanUpBSNulls x)
+                poke cvalue vPtr
+                poke clength 0
+                poke cformat 0
             x -> do
                 poke ctype 0
                 vPtr <- cstrUtf8BString (fromSql x)
