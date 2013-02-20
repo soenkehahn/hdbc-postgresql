@@ -19,9 +19,6 @@ import Test.QuickCheck.Property
 import SpecificDB
 
 
-containsNull :: Maybe String -> Bool
-containsNull = maybe False (elem '\NUL')
-
 epsilonEquals :: (Ord a, Num a) => a -> Maybe a -> Maybe a -> Bool
 epsilonEquals epsilon (Just a) (Just b) =
     abs (a - b) <= epsilon
@@ -33,22 +30,20 @@ tests = TestList (map (\ (name, property) -> qctest name property) properties)
 
 properties :: [(String, Property)]
 properties =
-    ("identityString", identity (P :: Phantom (Maybe String)) "text" (not . containsNull) (==)) :
-    ("identityManyString", identityMany (P :: Phantom (Maybe String)) "text" (not . containsNull) (==)) :
-    ("identityBytestring", identity (P :: Phantom (Maybe ByteString)) "bytea" (const True) (==)) :
-    ("identityManyBytestring", identityMany (P :: Phantom (Maybe ByteString)) "bytea" (const True) (==)) :
-    ("identityDouble", identity (P :: Phantom (Maybe Double)) "double precision" (const True) (epsilonEquals 0.00000001)) :
-    ("identityManyDouble", identityMany (P :: Phantom (Maybe Double)) "double precision" (const True) (epsilonEquals 0.00000001)) :
-    ("identityInt64", identity (P :: Phantom (Maybe Int64)) "bigint" (const True) (==)) :
-    ("identityManyInt64", identityMany (P :: Phantom (Maybe Int64)) "bigint" (const True) (==)) :
-    ("identityInt32", identity (P :: Phantom (Maybe Int32)) "integer" (const True) (==)) :
-    ("identityManyInt32", identityMany (P :: Phantom (Maybe Int32)) "integer" (const True) (==)) :
+    ("identityString", identity (withoutNull :: Gen (Maybe String)) "text" (==)) :
+    ("identityManyString", identityMany (withoutNull :: Gen (Maybe String)) "text" (==)) :
+    ("identityBytestring", identity (arbitrary :: Gen (Maybe ByteString)) "bytea" (==)) :
+    ("identityManyBytestring", identityMany (arbitrary :: Gen (Maybe ByteString)) "bytea" (==)) :
+    ("identityDouble", identity (arbitrary :: Gen (Maybe Double)) "double precision" (epsilonEquals 0.00000001)) :
+    ("identityManyDouble", identityMany (arbitrary :: Gen (Maybe Double)) "double precision" (epsilonEquals 0.00000001)) :
+    ("identityInt64", identity (arbitrary :: Gen (Maybe Int64)) "bigint" (==)) :
+    ("identityManyInt64", identityMany (arbitrary :: Gen (Maybe Int64)) "bigint" (==)) :
+    ("identityInt32", identity (arbitrary :: Gen (Maybe Int32)) "integer" (==)) :
+    ("identityManyInt32", identityMany (arbitrary :: Gen (Maybe Int32)) "integer" (==)) :
     []
 
 
 -- * utils
-
-data Phantom a = P
 
 equals :: (Show a) => (a -> a -> Bool) -> a -> a -> Property
 equals (~=) a b =
@@ -68,6 +63,11 @@ instance Arbitrary ByteString where
     arbitrary = pack <$> arbitrary
     shrink xs = pack <$> shrink (unpack xs)
 
+withoutNull :: Gen (Maybe String)
+withoutNull =
+    frequency [(1, return Nothing), (3, Just <$> stringGen)]
+  where
+    stringGen = listOf (arbitrary `suchThat` (/= '\NUL'))
 
 
 -- * generic properties
@@ -76,10 +76,10 @@ instance Arbitrary ByteString where
 -- the database and read back and if that output is equal to the input
 -- (using a given equality function).
 identity :: forall a . (Arbitrary a, Show a, Eq a, Convertible a SqlValue, Convertible SqlValue a) =>
-    Phantom a -> String -> (a -> Bool) -> (a -> a -> Bool) -> Property
-identity _ sqlTypeName pred (~=) =
-    property $ \ (a :: a) ->
-    (pred a) ==>
+    Gen a -> String -> (a -> a -> Bool) -> Property
+identity gen sqlTypeName (~=) =
+    property $
+    forAll gen $ \ (a :: a) ->
     morallyDubiousIOProperty $
         -- connect to the db
         bracket connectDB disconnect $ \ db ->
@@ -94,10 +94,10 @@ identity _ sqlTypeName pred (~=) =
 
 -- | Like identity, but with multiple values (in multiple rows).
 identityMany :: forall a . (Arbitrary a, Show a, Ord a, Convertible a SqlValue, Convertible SqlValue a) =>
-    Phantom a -> String -> (a -> Bool) -> (a -> a -> Bool) -> Property
-identityMany _ sqlTypeName pred (~=) =
-    property $ \ (xs :: [a]) ->
-    (all pred xs) ==>
+    Gen a -> String -> (a -> a -> Bool) -> Property
+identityMany gen sqlTypeName (~=) =
+    property $
+    forAll (listOf gen) $ \ (xs :: [a]) ->
     morallyDubiousIOProperty $
         -- connect to the db
         bracket connectDB disconnect $ \ db ->
