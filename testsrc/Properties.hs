@@ -29,27 +29,20 @@ epsilonEquals _ Nothing Nothing = True
 epsilonEquals _ _ _ = False
 
 tests :: Test
-tests = TestList $
-    qctest "identityString"
-        (identity (P :: Phantom (Maybe String)) "text" (not . containsNull) (==)) :
-    qctest "identityManyString"
-        (identityMany (P :: Phantom (Maybe String)) "text" (not . containsNull) (==)) :
-    qctest "identityBytestring"
-        (identity (P :: Phantom (Maybe ByteString)) "bytea" (const True) (==)) :
-    qctest "identityManyBytestring"
-        (identityMany (P :: Phantom (Maybe ByteString)) "bytea" (const True) (==)) :
-    qctest "identityDouble"
-        (identity (P :: Phantom (Maybe Double)) "double precision" (const True) (epsilonEquals 0.00000001)) :
-    qctest "identityManyDouble"
-        (identityMany (P :: Phantom (Maybe Double)) "double precision" (const True) (epsilonEquals 0.00000001)) :
-    qctest "identityInt64"
-        (identity (P :: Phantom (Maybe Int64)) "bigint" (const True) (==)) :
-    qctest "identityManyInt64"
-        (identityMany (P :: Phantom (Maybe Int64)) "bigint" (const True) (==)) :
-    qctest "identityInt32"
-        (identity (P :: Phantom (Maybe Int32)) "integer" (const True) (==)) :
-    qctest "identityManyInt32"
-        (identityMany (P :: Phantom (Maybe Int32)) "integer" (const True) (==)) :
+tests = TestList (map (\ (name, property) -> qctest name property) properties)
+
+properties :: [(String, Property)]
+properties =
+    ("identityString", identity (P :: Phantom (Maybe String)) "text" (not . containsNull) (==)) :
+    ("identityManyString", identityMany (P :: Phantom (Maybe String)) "text" (not . containsNull) (==)) :
+    ("identityBytestring", identity (P :: Phantom (Maybe ByteString)) "bytea" (const True) (==)) :
+    ("identityManyBytestring", identityMany (P :: Phantom (Maybe ByteString)) "bytea" (const True) (==)) :
+    ("identityDouble", identity (P :: Phantom (Maybe Double)) "double precision" (const True) (epsilonEquals 0.00000001)) :
+    ("identityManyDouble", identityMany (P :: Phantom (Maybe Double)) "double precision" (const True) (epsilonEquals 0.00000001)) :
+    ("identityInt64", identity (P :: Phantom (Maybe Int64)) "bigint" (const True) (==)) :
+    ("identityManyInt64", identityMany (P :: Phantom (Maybe Int64)) "bigint" (const True) (==)) :
+    ("identityInt32", identity (P :: Phantom (Maybe Int32)) "integer" (const True) (==)) :
+    ("identityManyInt32", identityMany (P :: Phantom (Maybe Int32)) "integer" (const True) (==)) :
     []
 
 
