@@ -10,12 +10,17 @@ import Database.HDBC.Types
 import Database.HDBC.PostgreSQL.Types
 import Control.Concurrent.MVar
 import Foreign.C.Types
-import Control.Exception
 import Foreign.Storable
 import Foreign.Marshal.Array
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Utils
+import Control.Applicative
+import Control.Monad (when)
 import Data.Word
+import Data.Foldable (forM_)
+import Data.Monoid
+import Numeric
+import Text.Printf
 import qualified Data.ByteString.UTF8 as BUTF8
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BCHAR8
@@ -25,6 +30,7 @@ import qualified Data.ByteString.Unsafe as B
 #endif
 
 #include "hdbc-postgresql-helper.h"
+
 
 raiseError :: String -> Word32 -> (Ptr CConn) -> IO a
 raiseError msg code cconn =
@@ -65,38 +71,43 @@ withStmt = genericUnwrap
 withRawStmt :: Stmt -> (Ptr WrappedCStmt -> IO b) -> IO b
 withRawStmt = withForeignPtr
 
-withCStringArr0 :: [SqlValue] -> (Ptr CString -> IO a) -> IO a
-withCStringArr0 inp action = withAnyArr0 convfunc freefunc inp action
-    where convfunc SqlNull = return nullPtr
-{-
-          convfunc y@(SqlZonedTime _) = convfunc (SqlString $ 
-                                                "TIMESTAMP WITH TIME ZONE '" ++ 
-                                                fromSql y ++ "'")
--}
-          convfunc y@(SqlUTCTime _) = convfunc (SqlZonedTime (fromSql y))
-          convfunc y@(SqlEpochTime _) = convfunc (SqlZonedTime (fromSql y))
-          convfunc (SqlByteString x) = cstrUtf8BString (cleanUpBSNulls x)
-          convfunc x = cstrUtf8BString (fromSql x)
-          freefunc x =
-              if x == nullPtr
-                 then return ()
-                 else free x
+revertBytes :: Int -> Ptr Word8 -> IO (Ptr Word8)
+revertBytes n inPtr = do
+    outPtr <- mallocBytes n
+    forM_ [0 .. pred n] $ \ i ->
+        poke (advancePtr outPtr i) =<< peek (advancePtr inPtr (pred n - i))
+    free inPtr
+    return outPtr
 
-cleanUpBSNulls :: B.ByteString -> B.ByteString
-cleanUpBSNulls = B.concatMap convfunc
-  where convfunc 0 = bsForNull
-        convfunc x = B.singleton x
-        bsForNull = BCHAR8.pack "\\000"
+-- | encode to postgresql's hex format, see
+--   http://www.postgresql.org/docs/9.2/static/datatype-binary.html,
+--   section 8.4.1
+toHex :: B.ByteString -> B.ByteString
+toHex a = mconcat (BCHAR8.pack "\\x" : map hex (B.unpack a))
+  where
+    hex :: Word8 -> B.ByteString
+    hex = BCHAR8.pack . printf "%02x"
 
-withAnyArr0 :: (a -> IO (Ptr b)) -- ^ Function that transforms input data into pointer
-            -> (Ptr b -> IO ())  -- ^ Function that frees generated data
-            -> [a]               -- ^ List of input data
-            -> (Ptr (Ptr b) -> IO c) -- ^ Action to run with the C array
-            -> IO c             -- ^ Return value
-withAnyArr0 input2ptract freeact inp action =
-    bracket (mapM input2ptract inp)
-            (\clist -> mapM_ freeact clist)
-            (\clist -> withArray0 nullPtr clist action)
+-- | decode from postgresql's hex format, see also 'toHex'
+fromHex :: B.ByteString -> Either String B.ByteString
+fromHex input = do
+    let (backslashX, hexDigits) = splitAt 2 $ BCHAR8.unpack input
+    when (backslashX /= "\\x") $
+        err ("expected \"\\x\", not: " ++ show (B.take 8 input))
+    B.pack <$> inner hexDigits
+  where
+    inner :: [Char] -> Either String [Word8]
+    inner [] = return []
+    inner (a : b : r) =
+        case readHex (a : b : []) of
+            ((n, []) : _) -> do
+                ns <- inner r
+                return (n : ns)
+            _ -> err ("unreadable hex digits: " ++ show ([a, b]))
+    inner _ = err "uneven number of digits"
+
+    err :: String -> Either String a
+    err msg = Left ("error during decoding of hexadecimal bytestring: " ++ msg)
 
 cstrUtf8BString :: B.ByteString -> IO CString
 cstrUtf8BString bs = do

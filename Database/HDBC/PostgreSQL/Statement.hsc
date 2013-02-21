@@ -10,11 +10,16 @@ import Database.HDBC.PostgreSQL.Utils
 import Foreign.C.Types
 import Foreign.ForeignPtr
 import Foreign.Ptr
+import Foreign.Storable
 import Control.Concurrent.MVar
 import Foreign.C.String
+import Foreign.Marshal.Alloc
+import Foreign.Marshal.Array
 import Control.Applicative ((<$>))
-import Control.Monad (liftM)
+import Control.Monad (liftM, when)
 import Data.List
+import Data.Foldable (forM_)
+import Data.Traversable (forM)
 import Data.Word
 import Data.Ratio
 import qualified Data.ByteString as B
@@ -24,6 +29,9 @@ import Database.HDBC.DriverUtils
 import Database.HDBC.PostgreSQL.PTypeConv
 import Data.Time.Format
 import System.Locale
+
+#include "pgtypes.h"
+
 
 l :: Monad m => t -> m ()
 l _ = return ()
@@ -39,12 +47,15 @@ data SState =
              -- Contains the query for the db, possibly with missing arguments.
              -- These parameters are postgres-style, i.e. $1, $2, ...
              -- (This is used when executing unprepared queries.)
-             preparedStatement :: Maybe StmtName,
+             preparedStatement :: Maybe PreparedStatement,
              -- Contains Nothing in case of unprepared queries.
              -- Contains the name of the prepared statement, if that exists.
              coldefmv :: MVar [(String, SqlColDesc)]}
 
-newtype StmtName = StmtName String
+data PreparedStatement =
+    PreparedStatement
+        String -- statement name
+        [#{type Oid}] -- types as inferred by postgres
 
 
 -- | Initializes and returns an unprepared 'Statement'.
@@ -119,7 +130,7 @@ newPreparedSth indbo mchildren query =
        addChild mchildren retval
        return retval
 
-prepareStatement :: Conn -> ChildList -> String -> IO StmtName
+prepareStatement :: Conn -> ChildList -> String -> IO PreparedStatement
 prepareStatement conn mchildren query = do
     allPreparedStatements <- getAllPreparedStatements
     let stmtName = head $ filter (\ n -> not (n `elem` allPreparedStatements))
@@ -131,7 +142,8 @@ prepareStatement conn mchildren query = do
                resptr <- pqexec cconn cquery
                throwSqlErrorOnError cconn =<< (pqresultStatus resptr :: IO Word32)
                return ()
-    return $ StmtName stmtName
+    types <- getStatementTypes conn stmtName
+    return $ PreparedStatement stmtName types
   where
     -- Returns the names of all registered prepared queries.
     getAllPreparedStatements :: IO [String]
@@ -162,6 +174,14 @@ prepareStatement conn mchildren query = do
                                      , seErrorMsg = "execute: " ++ statusmsg ++
                                                     ": " ++ errormsg}
 
+getStatementTypes :: Conn -> String -> IO [#{type Oid}]
+getStatementTypes conn stmtName =
+    withConnLocked conn $ \ cconn ->
+    B.useAsCString (BUTF8.fromString stmtName) $ \ cStmtName -> do
+        pgresult <- pqdescribePrepared cconn cStmtName
+        nparams <- pqnparams pgresult
+        forM [0 .. pred nparams] $ \ i ->
+            pqparamtype pgresult i
 
 fgetColumnNames :: SState -> IO [(String)]
 fgetColumnNames sstate =
@@ -175,20 +195,26 @@ fdescribeResult sstate =
 {- For now, we try to just  handle things as simply as possible.
 FIXME lots of room for improvement here (types, etc). -}
 fexecute :: (Num a, Read a) => SState -> [SqlValue] -> IO a
-fexecute sstate args = withConnLocked (dbo sstate) $ \cconn ->
-                       withCStringArr0 args $ \cargs -> -- wichSTringArr0 uses UTF-8
-    do l "in fexecute"
-       public_ffinish sstate    -- Sets nextrowmv to -1
-       resptr <- case preparedStatement sstate of
-                    Nothing ->
-                        B.useAsCString (BUTF8.fromString (squery sstate)) $ \cquery ->
-                        pqexecParams cconn cquery
-                            (genericLength args) nullPtr cargs nullPtr nullPtr 0
-                    Just (StmtName stmtName) ->
-                        B.useAsCString (BUTF8.fromString stmtName) $ \cStmtName ->
-                        pqexecPrepared cconn cStmtName
-                            (genericLength args) cargs nullPtr nullPtr 0
-       handleResultStatus cconn resptr sstate =<< pqresultStatus resptr
+fexecute sstate args =
+    withConnLocked (dbo sstate) $ \ cconn ->
+    withCQuery $ \ cqueryinformation ->
+    withArray (replicate len nullPtr) $ \ cvalues ->
+    withArray (replicate len 0) $ \ clengths ->
+    withArray (replicate len 0) $ \ cformats ->
+    fexecuteOnArrays sstate cconn cqueryinformation cvalues clengths cformats args
+  where
+    len = length args
+
+    withCQuery :: (CQueryInformation -> IO a) -> IO a
+    withCQuery action = case preparedStatement sstate of
+        Nothing ->
+            B.useAsCString (BUTF8.fromString (squery sstate)) $ \ cquery ->
+            withArray (replicate len 0) $ \ ctypes ->
+            action (CQuery cquery ctypes)
+        Just (PreparedStatement stmtName types) ->
+            B.useAsCString (BUTF8.fromString stmtName) $ \ cStmtName ->
+            action (CPreparedStatement cStmtName types)
+
 
 {- | Differs from fexecute in that it does not prepare its input
    query, and the input query may contain multiple statements.  This
@@ -202,8 +228,8 @@ fexecuteRaw sstate =
                 Nothing ->
                     B.useAsCString (BUTF8.fromString (squery sstate)) $ \cquery ->
                     pqexec cconn cquery
-                Just (StmtName stmtName) ->
-                    withCStringArr0 [] $ \cEmptyArgs ->
+                Just (PreparedStatement stmtName _types) ->
+                    withArray [] $ \ cEmptyArgs ->
                     B.useAsCString (BUTF8.fromString stmtName) $ \cStmtName ->
                     pqexecPrepared cconn cStmtName
                         0 cEmptyArgs nullPtr nullPtr 0
@@ -318,8 +344,116 @@ fgetcoldef cstmt =
 
 -- FIXME: needs a faster algorithm.
 fexecutemany :: SState -> [[SqlValue]] -> IO ()
-fexecutemany sstate arglist =
-    mapM_ (fexecute sstate :: [SqlValue] -> IO Int) arglist >> return ()
+fexecutemany _ [] = return ()
+fexecutemany sstate rows =
+    withConnLocked (dbo sstate) $ \ cconn ->
+    case preparedStatement sstate of
+        Nothing -> throwSqlError $ SqlError "" (-1)
+            "internal error: fexecutemany should never be called on non-prepared statements"
+        Just (PreparedStatement stmtName types) ->
+            B.useAsCString (BUTF8.fromString stmtName) $ \ cStmtName ->
+            withArray (replicate len nullPtr) $ \ cvalues ->
+            withArray (replicate len 0) $ \ clengths ->
+            withArray (replicate len 0) $ \ cformats -> do
+                let processRow :: [SqlValue] -> IO Int
+                    processRow = fexecuteOnArrays sstate cconn
+                                        (CPreparedStatement cStmtName types)
+                                        cvalues clengths cformats
+                mapM_ processRow rows
+  where
+    len = length rows
+
+-- Left for use with PQexecParams, Right for PQexecPrepared
+data CQueryInformation
+    = CQuery CString (Ptr #{type Oid})
+        -- For non-prepared statements.
+        -- (executeMany is not possible.)
+        -- 'fexecuteOnArrays' has to write the types into the c-array
+        -- corresponding to the processed values.
+    | CPreparedStatement CString [#{type Oid}]
+        -- For prepared statements.
+        -- 'fexecuteOnArrays' has to check that the processed values
+        -- match the types in this list.
+
+-- Converts the given SqlValues to CChar arrays;
+-- pokes the corresponding types (for non-prepared statements) or
+-- checks type correctness (for prepared statements);
+-- writes format and length information and
+-- executes either pqexecParams or pqexecPrepared.
+fexecuteOnArrays :: (Read a, Num a) =>
+       SState -> Ptr CConn
+    -> CQueryInformation
+    -> Ptr (Ptr CChar) -> Ptr CInt -> Ptr CInt
+    -> [SqlValue] -> IO a
+fexecuteOnArrays sstate cconn cqueryinformation cvalues clengths cformats row = do
+    converted <- mapM convert row
+    checkOrPokeTypes converted
+    -- poke the rest
+    forM_ (zip [0 ..] converted) $ \ (i, (_ctype, cvalue, clength, cformat)) -> do
+        poke (advancePtr cvalues i) cvalue
+        poke (advancePtr clengths i) clength
+        poke (advancePtr cformats i) cformat
+
+    public_ffinish sstate    -- Sets nextrowmv to -1
+    resptr <- case cqueryinformation of
+        CQuery cquery ctypes ->
+            pqexecParams cconn cquery
+                (genericLength row) ctypes cvalues clengths cformats 0
+        CPreparedStatement cStmtName _types ->
+            pqexecPrepared cconn cStmtName
+                (genericLength row) cvalues clengths cformats 0
+    freeCValues
+    handleResultStatus cconn resptr sstate =<< pqresultStatus resptr
+  where
+    checkOrPokeTypes :: [(#{type Oid}, Ptr CChar, CInt, CInt)] -> IO ()
+    checkOrPokeTypes converted = case cqueryinformation of
+        CQuery _query ctypes ->
+            -- un-prepared query: types get poked
+            forM_ (zip [0 ..] converted) $ \ (i, (ctype, _, _, _)) ->
+                poke (advancePtr ctypes i) ctype
+        CPreparedStatement _cStmtName types ->
+            -- prepared statement: check types
+            forM_ (zip types converted) $ \ x -> case x of
+                (_       , (_, _, _, 0)) -> return ()
+                (expected, (ctype, _, _, _)) ->
+                    when (expected /= ctype) $
+                        throwSqlError $ SqlError "" (-1)
+                            ("type mismatch during execution of prepared query. \n" ++
+                             "query: " ++ squery sstate ++ "\n" ++
+                             "given values: " ++ show row)
+
+    convert :: SqlValue -> IO (#{type Oid}, Ptr CChar, CInt, CInt)
+    convert SqlNull = return (0, nullPtr, 0, 0)
+    convert (SqlDouble d) = do
+        vPtr <- malloc
+        poke vPtr d
+        networkEndian <- revertBytes 8 (castPtr vPtr)
+        return (#{const PG_TYPE_FLOAT8}, castPtr networkEndian, 8, 1)
+    convert (SqlInt64 i) = do
+        vPtr <- malloc
+        poke vPtr i
+        networkEndian <- revertBytes 8 (castPtr vPtr)
+        return (#{const PG_TYPE_INT8}, castPtr networkEndian, 8, 1)
+    convert (SqlInt32 i) = do
+        vPtr <- malloc
+        poke vPtr i
+        networkEndian <- revertBytes 4 (castPtr vPtr)
+        return (#{const PG_TYPE_INT4}, castPtr networkEndian, 4, 1)
+    convert (SqlByteString x) = do
+        vPtr <- cstrUtf8BString (toHex x)
+        return (0, vPtr, 0, 0)
+    convert x@(SqlUTCTime _) = convert (SqlZonedTime (fromSql x))
+    convert x@(SqlEpochTime _) = convert (SqlZonedTime (fromSql x))
+    convert x = do
+        vPtr <- cstrUtf8BString (fromSql x)
+        return (0, vPtr, 0, 0)
+
+    freeCValues :: IO ()
+    freeCValues = forM_ [0 .. pred (length row)] $ \ i -> do
+        ptr <- peek (advancePtr cvalues i)
+        when (ptr /= nullPtr) $
+            free ptr
+
 
 -- Finish and change state
 public_ffinish :: SState -> IO ()
@@ -356,6 +490,9 @@ foreign import ccall safe "libpq-fe.h PQexecPrepared"
                     (Ptr CInt) ->
                     CInt ->
                     IO (Ptr CStmt)
+
+foreign import ccall safe "libpq-fe.h PQdescribePrepared"
+  pqdescribePrepared :: Ptr CConn -> CString -> IO (Ptr PQdescribePreparedResult)
 
 foreign import ccall safe "libpq-fe.h PQexec"
   pqexec :: (Ptr CConn) -> CString -> IO (Ptr CStmt)
@@ -400,6 +537,12 @@ foreign import ccall unsafe "libpq-fe.h PQfname"
 
 foreign import ccall unsafe "libpq-fe.h PQftype"
   pqftype :: Ptr CStmt -> CInt -> IO #{type Oid}
+
+foreign import ccall unsafe "libpq-fe.h PQnparams"
+  pqnparams :: Ptr PQdescribePreparedResult -> IO Int
+
+foreign import ccall unsafe "libpq-fe.h PQparamtype"
+  pqparamtype :: Ptr PQdescribePreparedResult -> Int -> IO #{type Oid}
 
 -- SqlValue construction function and helpers
 
@@ -471,7 +614,9 @@ makeSqlValue sqltypeid bstrval =
       -- TODO: For now we just map the binary types to SqlByteStrings. New SqlValue constructors are needed to handle these.
       tid | tid == SqlBinaryT        ||
             tid == SqlVarBinaryT     ||
-            tid == SqlLongVarBinaryT    -> return $ SqlByteString bstrval
+            tid == SqlLongVarBinaryT    -> case fromHex bstrval of
+                Left msg -> throwSqlError $ SqlError "" (-1) msg
+                Right bs -> return $ SqlByteString bs
 
       SqlGUIDT -> return $ SqlByteString bstrval
 

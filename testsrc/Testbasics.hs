@@ -31,7 +31,7 @@ basicQueries = dbTestCase (\dbh ->
                           )
     
 createTable = dbTestCase (\dbh ->
-    do run dbh "CREATE TABLE hdbctest1 (testname VARCHAR(20), testid INTEGER, testint INTEGER, testtext TEXT)" []
+    do run dbh "CREATE TABLE hdbctest1 (testname VARCHAR(20), testid BIGINT, testint BIGINT, testtext TEXT)" []
        commit dbh
                          )
 
@@ -57,7 +57,7 @@ runReplace = dbTestCase (\dbh ->
 executeReplace = dbTestCase (\dbh ->
     do sth <- prepare dbh "INSERT INTO hdbctest1 VALUES ('executeReplace',?,?,?)"
        execute sth [iToSql 1, iToSql 1234, toSql "Foo"]
-       execute sth [SqlInt32 2, SqlNull, toSql "Bar"]
+       execute sth [SqlInt64 2, SqlNull, toSql "Bar"]
        commit dbh
        sth <- prepare dbh "SELECT * FROM hdbctest1 WHERE testname = ? ORDER BY testid"
        execute sth [SqlString "executeReplace"]
