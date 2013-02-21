@@ -14,8 +14,13 @@ import Foreign.Storable
 import Foreign.Marshal.Array
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Utils
+import Control.Applicative
+import Control.Monad (when)
 import Data.Word
 import Data.Foldable (forM_)
+import Data.Monoid
+import Numeric
+import Text.Printf
 import qualified Data.ByteString.UTF8 as BUTF8
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BCHAR8
@@ -74,12 +79,35 @@ revertBytes n inPtr = do
     free inPtr
     return outPtr
 
-cleanUpBSNulls :: B.ByteString -> B.ByteString
-cleanUpBSNulls bs | 0 `B.notElem` bs = bs
-                  | otherwise = B.concatMap convfunc bs
-  where convfunc 0 = bsForNull
-        convfunc x = B.singleton x
-        bsForNull = BCHAR8.pack "\\000"
+-- | encode to postgresql's hex format, see
+--   http://www.postgresql.org/docs/9.2/static/datatype-binary.html,
+--   section 8.4.1
+toHex :: B.ByteString -> B.ByteString
+toHex a = mconcat (BCHAR8.pack "\\x" : map hex (B.unpack a))
+  where
+    hex :: Word8 -> B.ByteString
+    hex = BCHAR8.pack . printf "%02x"
+
+-- | decode from postgresql's hex format, see also 'toHex'
+fromHex :: B.ByteString -> Either String B.ByteString
+fromHex input = do
+    let (backslashX, hexDigits) = splitAt 2 $ BCHAR8.unpack input
+    when (backslashX /= "\\x") $
+        err ("expected \"\\x\", not: " ++ show (B.take 8 input))
+    B.pack <$> inner hexDigits
+  where
+    inner :: [Char] -> Either String [Word8]
+    inner [] = return []
+    inner (a : b : r) =
+        case readHex (a : b : []) of
+            ((n, []) : _) -> do
+                ns <- inner r
+                return (n : ns)
+            _ -> err ("unreadable hex digits: " ++ show ([a, b]))
+    inner _ = err "uneven number of digits"
+
+    err :: String -> Either String a
+    err msg = Left ("error during decoding of hexadecimal bytestring: " ++ msg)
 
 cstrUtf8BString :: B.ByteString -> IO CString
 cstrUtf8BString bs = do

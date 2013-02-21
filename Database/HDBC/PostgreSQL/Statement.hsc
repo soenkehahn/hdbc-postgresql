@@ -284,7 +284,7 @@ fexecuteOnArrays sstate cconn cquery ctypes cvalues clengths cformats row = do
                     (SqlZonedTime (fromSql sqlValue))
             SqlByteString x -> do
                 poke ctype 0
-                vPtr <- cstrUtf8BString (cleanUpBSNulls x)
+                vPtr <- cstrUtf8BString (toHex x)
                 poke cvalue vPtr
                 poke clength 0
                 poke cformat 0
@@ -440,7 +440,9 @@ makeSqlValue sqltypeid bstrval =
       -- TODO: For now we just map the binary types to SqlByteStrings. New SqlValue constructors are needed to handle these.
       tid | tid == SqlBinaryT        ||
             tid == SqlVarBinaryT     ||
-            tid == SqlLongVarBinaryT    -> return $ SqlByteString bstrval
+            tid == SqlLongVarBinaryT    -> case fromHex bstrval of
+                Left msg -> throwSqlError $ SqlError "" (-1) msg
+                Right bs -> return $ SqlByteString bs
 
       SqlGUIDT -> return $ SqlByteString bstrval
 
