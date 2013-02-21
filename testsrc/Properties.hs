@@ -16,6 +16,8 @@ import Test.HUnit
 import Test.HUnit.Tools
 import Test.QuickCheck
 import Test.QuickCheck.Property
+
+import Database.HDBC.PostgreSQL.Utils
 import SpecificDB
 
 
@@ -40,6 +42,7 @@ properties =
     ("identityManyInt64", identityMany (arbitrary :: Gen (Maybe Int64)) "bigint" (==)) :
     ("identityInt32", identity (arbitrary :: Gen (Maybe Int32)) "integer" (==)) :
     ("identityManyInt32", identityMany (arbitrary :: Gen (Maybe Int32)) "integer" (==)) :
+    ("fromHexSmokeTest", fromHexSmokeTest) :
     []
 
 
@@ -114,3 +117,6 @@ identityMany gen sqlTypeName (~=) =
     convert :: [[SqlValue]] -> Set a
     convert ([a] : r) = Set.insert (fromSql a) (convert r)
     convert [] = Set.empty
+
+fromHexSmokeTest =
+    property $ \ bs -> length (show (fromHex bs)) `seq` True
