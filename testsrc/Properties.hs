@@ -36,6 +36,7 @@ properties =
     ("identityManyString", identityMany (withoutNull :: Gen (Maybe String)) "text" (==)) :
     ("identityBytestring", identity (arbitrary :: Gen (Maybe ByteString)) "bytea" (==)) :
     ("identityManyBytestring", identityMany (arbitrary :: Gen (Maybe ByteString)) "bytea" (==)) :
+    ("identityByteStringInTextField", identity (arbitrary :: Gen (Maybe ByteString)) "text" (==)) :
     ("identityDouble", identity (arbitrary :: Gen (Maybe Double)) "double precision" (epsilonEquals 0.00000001)) :
     ("identityManyDouble", identityMany (arbitrary :: Gen (Maybe Double)) "double precision" (epsilonEquals 0.00000001)) :
     ("identityInt64", identity (arbitrary :: Gen (Maybe Int64)) "bigint" (==)) :
