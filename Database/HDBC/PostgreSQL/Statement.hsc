@@ -413,7 +413,7 @@ fexecuteOnArrays sstate cconn cqueryinformation cvalues clengths cformats row = 
         CPreparedStatement _cStmtName types ->
             -- prepared statement: check types
             forM_ (zip types converted) $ \ x -> case x of
-                (_       , (_, _, _, 0)) -> return ()
+                (_       , (0, _, _, 0)) -> return ()
                 (expected, (ctype, _, _, _)) ->
                     when (expected /= ctype) $
                         throwSqlError $ SqlError "" (-1)
@@ -440,7 +440,7 @@ fexecuteOnArrays sstate cconn cqueryinformation cvalues clengths cformats row = 
         return (#{const PG_TYPE_INT4}, castPtr networkEndian, 4, 1)
     convert (SqlByteString x) = do
         vPtr <- cstrUtf8BString (toHex x)
-        return (0, vPtr, 0, 0)
+        return (#{const PG_TYPE_BYTEA}, vPtr, 0, 0)
     convert x@(SqlUTCTime _) = convert (SqlZonedTime (fromSql x))
     convert x@(SqlEpochTime _) = convert (SqlZonedTime (fromSql x))
     convert x = do
