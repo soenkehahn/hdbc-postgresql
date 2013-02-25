@@ -44,6 +44,7 @@ properties =
     ("identityInt32", identity (arbitrary :: Gen (Maybe Int32)) "integer" (==)) :
     ("identityManyInt32", identityMany (arbitrary :: Gen (Maybe Int32)) "integer" (==)) :
     ("fromHexSmokeTest", fromHexSmokeTest) :
+    ("writeMultipleTextFields", writeMultipleTextFields) :
     []
 
 
@@ -62,6 +63,9 @@ equalSets (~=) a b =
     inner [] [] = True
     inner (a : ra) (b : rb) = (a ~= b) && inner ra rb
     inner _ _ = False
+
+listOfLength :: Int -> Gen a -> Gen [a]
+listOfLength n gen = mapM (const gen) [1 .. n]
 
 instance Arbitrary ByteString where
     arbitrary = pack <$> arbitrary
@@ -119,5 +123,32 @@ identityMany gen sqlTypeName (~=) =
     convert ([a] : r) = Set.insert (fromSql a) (convert r)
     convert [] = Set.empty
 
+
 fromHexSmokeTest =
     property $ \ bs -> length (show (fromHex bs)) `seq` True
+
+
+-- | Creates a table with multiple text fields and writes to them using
+--   executeMany.
+writeMultipleTextFields =
+    forAll (choose (1, 20)) $ \ n ->
+    forAll (listOfLength n arbitrary) $ \ bytestrings ->
+    morallyDubiousIOProperty $ do
+        let createTable = "create table testtable (" ++
+                intercalate ", " (map (++ " TEXT") (take n fieldNames)) ++
+                ");"
+        -- connect to the db
+        bracket connectDB disconnect $ \ db ->
+        -- create a temporary test table
+          bracket
+            (runRaw db createTable)
+            (const $ runRaw db "DROP TABLE testtable;") $
+            const $ do
+                stmt <- prepare db ("insert into testtable values (" ++
+                            intercalate ", " (replicate n "?") ++
+                            ");")
+                executeMany stmt $ [map SqlByteString bytestrings]
+                return True
+  where
+    -- infinite list of field names
+    fieldNames = map (\ n -> "FIELD" ++ show n) [0 ..]
