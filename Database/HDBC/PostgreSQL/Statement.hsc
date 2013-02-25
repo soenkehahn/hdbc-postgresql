@@ -351,17 +351,16 @@ fexecutemany sstate rows =
         Nothing -> throwSqlError $ SqlError "" (-1)
             "internal error: fexecutemany should never be called on non-prepared statements"
         Just (PreparedStatement stmtName types) ->
-            B.useAsCString (BUTF8.fromString stmtName) $ \ cStmtName ->
-            withArray (replicate len nullPtr) $ \ cvalues ->
-            withArray (replicate len 0) $ \ clengths ->
-            withArray (replicate len 0) $ \ cformats -> do
-                let processRow :: [SqlValue] -> IO Int
-                    processRow = fexecuteOnArrays sstate cconn
-                                        (CPreparedStatement cStmtName types)
-                                        cvalues clengths cformats
-                mapM_ processRow rows
-  where
-    len = length rows
+            let len = length types
+            in B.useAsCString (BUTF8.fromString stmtName) $ \ cStmtName ->
+               withArray (replicate len nullPtr) $ \ cvalues ->
+               withArray (replicate len 0) $ \ clengths ->
+               withArray (replicate len 0) $ \ cformats -> do
+                   let processRow :: [SqlValue] -> IO Int
+                       processRow = fexecuteOnArrays sstate cconn
+                                           (CPreparedStatement cStmtName types)
+                                           cvalues clengths cformats
+                   mapM_ processRow rows
 
 -- Left for use with PQexecParams, Right for PQexecPrepared
 data CQueryInformation
